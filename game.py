@@ -1,4 +1,5 @@
 import numpy as np
+import random
 import math
 from typing import Tuple, List
 
@@ -8,11 +9,17 @@ class Board():
 
         # lines
         self.N_LINES = 2 * size * (size + 1)
-        self.l = np.zeros((self.N_LINES,), dtype=np.float32)
+        self.l = np.zeros((self.N_LINES,), dtype=np.int8)
 
         # boxes
         self.N_BOXES = size * size
-        self.b = np.zeros((size, size))
+        self.b = np.zeros((self.N_BOXES,), dtype=np.int8)
+        
+        # maps for connected lines and boxes
+        self.line_to_boxes = [self.getConnectedBoxes(i) for i in range(self.N_LINES)]
+        self.box_to_lines = [self.getConnectedLines((i, j)) for i in range(size) for j in range(size)]
+        
+        self.boxes_to_win = math.floor(self.N_BOXES / 2) + 1
     
     def executeMove(self, line: int, player: int):
         assert line < self.N_LINES, "line is out of bounds"
@@ -23,17 +30,20 @@ class Board():
         # check whether a new box was captured
         # this is the case when the line belongs to a box (maximum of two boxes) which now has 4 drawn lines
         box_captured = False
-        for box in self.getConnectedBoxes(line):
-            lines = self.getConnectedLines(box)
-
-            if len([self.l[line] for line in lines if self.l[line] != 0]) == 4: # If all connected lines are != 0 (taken)
-                assert self.b[box[0]][box[1]] == 0, "box already captured"
-                self.b[box[0]][box[1]] = player
-                box_captured = True
+        for box in self.line_to_boxes[line]:
+            lines = self.box_to_lines[box[0] * self.SIZE + box[1]]
+            
+            # if all surrounding lines are filled, give the box to the player
+            if np.all(self.l[lines] != 0):
+                idx = box[0] * self.SIZE + box[1]
+                if self.b[idx] == 0:
+                    self.b[idx] = player
+                    box_captured = True
 
         return box_captured
     
     def getConnectedBoxes(self, line: int) -> List[Tuple[int, int]]:
+        # returns the boxes a line is a part of
         if line < int(self.N_LINES / 2):
             # horizontal line
             i = line // self.SIZE # row of the connected box
@@ -60,34 +70,39 @@ class Board():
                 return [(i, j - 1), (i, j)]  # [left box, right box]
     
     def getConnectedLines(self, box: Tuple[int, int]) -> List[int]:
+        # returns the lines surrounding a box
         i = box[0] # Row
         j = box[1] # Column
+        
+        half = int(self.N_LINES / 2)
 
         # horizontal lines
         line_top = i * self.SIZE + j  # top line
         line_bottom = (i + 1) * self.SIZE + j  # bottom line
 
         # vertical lines
-        line_left = int(self.N_LINES / 2) + j * self.SIZE + i  # left line
-        line_right = int(self.N_LINES / 2) + (j + 1) * self.SIZE + i  # right line
+        line_left = half + j * self.SIZE + i  # left line
+        line_right = half + (j + 1) * self.SIZE + i  # right line
 
         return [line_top, line_bottom, line_left, line_right]
     
-    def getValidMoves(self) -> List[int]:
-        return np.where(self.l == 0)[0].tolist()
+    def getValidMoves(self) -> np.ndarray:
+        # returns a boolean array of unfilled lines
+        return np.flatnonzero(self.l == 0)
     
     def checkFinished(self):
         # player reached necessary number of captured boxes to win the game
-        boxes_to_win = math.floor(self.N_BOXES / 2) + 1
-
-        if ((self.b == 1).sum()) >= boxes_to_win:
+        if ((self.b == 1).sum()) >= self.boxes_to_win:
             return 1
 
-        elif ((self.b == -1).sum()) >= boxes_to_win:
+        elif ((self.b == -1).sum()) >= self.boxes_to_win:
             return -1
 
+        elif np.all(self.l != 0):  # no free lines left
+            return 0 
+        
         else:
-            return None  # not finished
+            return None
     
     def add_colour(self, text: str, color_code: int) -> str:
         return f"\x1b[{color_code}m{text}\x1b[0m"
@@ -110,8 +125,8 @@ class Board():
             string = self.add_colour("|", color)
 
             # color the box when the box right to the line is already captured
-            box = self.getConnectedBoxes(left_line)[-1]
-            box_value = self.b[box[0], box[1]]
+            box = self.line_to_boxes(left_line)[-1]
+            box_value = self.b[box[0] * self.SIZE + box[1]]
             if box_value == 0:
                 return string + "      "
             else:
@@ -132,7 +147,7 @@ class Board():
             # 1) use top line
             for j in range(self.SIZE):
                 string += self.str_horizontal_line(
-                    line=self.getConnectedLines((i, j))[0],
+                    line=self.box_to_lines((i, j))[0],
                     last_column=(j == self.SIZE - 1)
                 )
             string += "\n"
@@ -141,12 +156,12 @@ class Board():
             for repeat in range(3):
                 for j in range(self.SIZE):
                     string += self.str_vertical_line(
-                        left_line=self.getConnectedLines((i, j))[2],
+                        left_line=self.box_to_lines((i, j))[2],
                         print_line_number=(repeat == 1)
                     )
 
                 # last vertical line in a row
-                right_line = self.getConnectedLines((i, self.SIZE - 1))[3]
+                right_line = self.box_to_lines((i, self.SIZE - 1))[3]
                 value = self.l[right_line]
                 if value != 0:
                     string += self.add_colour("|", 31 if value == 1 else 32)
@@ -159,7 +174,7 @@ class Board():
             if i == self.SIZE - 1:
                 for j in range(self.SIZE):
                     string += self.str_horizontal_line(
-                        line=self.getConnectedLines((i, j))[1],
+                        line=self.box_to_lines((i, j))[1],
                         last_column=(j == self.SIZE - 1)
                     )
                 string += "\n"
@@ -213,9 +228,9 @@ class Board():
         return l
 
 class DotsAndBoxesGame():
-    def __init__(self, size: int = 3):
+    def __init__(self, size: int = 3, starting_player: int = None):
         self.SIZE = size
-        self.current_player = 1
+        self.current_player = (1 if random.random() < 0.5 else -1) if starting_player is None else starting_player
         self.result = None
 
         self.board = Board(size)
@@ -232,16 +247,17 @@ class DotsAndBoxesGame():
         return self.board.getValidMoves()
 
     def getCanonicalBoard(self) -> Tuple[np.ndarray, np.ndarray]:
+        # returns the board as if the current player were player 1
         canonical_lines = self.current_player * self.board.l
-        canonical_lines[canonical_lines == 0.] = 0.  # -0.0 to 0.0
         
-        canonical_boxes = self.current_player * self.board.b
-        canonical_boxes[canonical_boxes == 0.] = 0.  # -0.0 to 0.0
-
+        # return the boxes as a 2D matrix
+        b2d = self.board.b.reshape((self.SIZE, self.SIZE))
+        canonical_boxes = self.current_player * b2d
         return canonical_lines, canonical_boxes
 
     @staticmethod
     def getSymmetries(l: np.ndarray, b: np.ndarray) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+        # returns a list of rotations and reflections for a board
 
         # rotations
         h, v = Board.l_to_h_v(l)
@@ -285,6 +301,14 @@ class DotsAndBoxesGame():
             line_reflections.append(Board.h_v_to_l(np.fliplr(h), np.fliplr(v)))      
 
         return line_rotations + line_reflections
+    
+    @staticmethod
+    def clone(s):
+        new = DotsAndBoxesGame(s.SIZE, s.current_player)
+        new.result = s.result
+        new.board.l = s.board.l.copy()
+        new.board.b = s.board.b.copy()
+        return new
 
     def display(self):
         print(self.board.board_string())

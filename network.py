@@ -201,28 +201,25 @@ class AZDualRes(nn.Module):
             p, v = self.forward(x)
         p = p.squeeze().detach().cpu().numpy()
         v = v.detach().cpu().item()
+        
+        # softmax
+        e = np.exp(p - np.max(p))
+        p = e / e.sum()
 
         # p possibly contains p > 0 for invalid moves -> erase those
         valid = np.zeros(l.squeeze().shape, dtype=np.float32)
         valid[valid_moves] = 1
 
-        p_valid = np.multiply(p, valid)
-        if np.sum(p_valid) == 0:
+        p = np.multiply(p, valid)
+        
+        if np.sum(p) == 0:
             # set probability equally for all valid moves
-            p_valid = np.multiply([1] * l.shape[0], valid)
+            p = np.multiply([1] * l.shape[0], valid)
 
         # normalization to sum 1
-        p = p_valid / np.sum(p_valid)
+        p = p / np.sum(p)
 
         return p, v
-
-
-    def save_checkpoint(self, model_path: str):
-        torch.save(self.state_dict(), model_path)
-
-
-    def load_checkpoint(self, model_path: str):
-        self.load_state_dict(torch.load(model_path))
 
 
 class ConvBlock(nn.Module):
@@ -282,14 +279,12 @@ class PolicyHead(nn.Module):
             in_features=fc_in_features,
             out_features=fc_out_features
         )
-        self.log_softmax = torch.nn.LogSoftmax(dim=1)
 
     def forward(self, x):
 
         x = self.relu(self.bn(self.conv(x)))
         x = x.view(x.size(0), -1)  # flatten
         x = self.fc(x)
-        x = self.log_softmax(x).exp()
 
         return x
 

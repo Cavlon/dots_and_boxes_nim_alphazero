@@ -1,16 +1,20 @@
 import os
 import torch
+import math
 import numpy as np
 import random
 import pickle
+import gc
 import multiprocessing as mp
+
 from tqdm.auto import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from network import AZDualRes
-from tqdm.contrib.concurrent import process_map
 from self_play import self_play_batch
+from collections import deque
 
 
-def perform_model_training(model: AZDualRes, train_examples_per_game_augmented: list,
+def perform_model_training(model: AZDualRes, training_set,
                                 game_buffer: int, n_batches: int, batch_size: int, 
                                 optimizer_parameters: dict, device: torch.device):
     """
@@ -23,42 +27,37 @@ def perform_model_training(model: AZDualRes, train_examples_per_game_augmented: 
     used to prevent overfitting.
 
     Optimization: The neural network parameters are optimized by stochastic gradient descent with momentum (without
-    learning rate annealingas opposed to the original paper).
+    learning rate annealing as opposed to the original paper).
 
     Parameters
     ----------
     model : AZNeuralNetwork
         the neural network which is updated
-    train_examples_per_game_augmented : [[[np.ndarray, np.ndarray, [float], float]]]
-        list (per game) of list of training examples (l, b, p, v) (from the current player's POV)
-    data_parameters, optimizer_parameters : dict
-        training hyperparameters
+    training_set : [[[np.ndarray, np.ndarray, [float], float]]]
+        list (per game) of list of training examples (s, p, v) (from the current player's POV)
+    game_buffer : int
+        max number of games to learn from
+    n_batches : int
+        number of batches to train off
+    batch_size:
+        number of examples per batch
+    optimizer_parameters : dict
+        optimiser hyperparameters
     device : torch.device
         device on which model training is performed
     """
 
-    # sample specific number of batches
-    print("Encoding train examples for given model .. ")
-    train_examples = [t for t_list in train_examples_per_game_augmented for t in t_list]  # flatten training list
-    train_examples = [(model.encode(board[0], board[1]), p, v) for board, p, v in train_examples]  # encode s=(l, b) for given model
-    for s, p, v in train_examples:
-        # for feature planes representation, batching s of shape [4, n, n] should result in batch of shape [batch_size, 4, n, n]
-        # if no dimension is added, resulting shape would be [4*batch_size, n, n] which would ignore one necessary dimension
-        s.shape = (1,) + s.shape
-    print(f"Batches are sampled from {len(train_examples):,} training examples (incl. augmentations) from the "
-            f"{len(train_examples_per_game_augmented):,}/{game_buffer:,} most recent games.")
+    # used to select batches without duplicating entries
+    all_indices = [(i, j) for i, game in enumerate(training_set) for j, _ in enumerate(game)]
+    
+    n_actions = len(training_set[0][0][1])
+    game_size = int(-0.5 + math.sqrt(4 + 8 * n_actions) / 4)
+    feature_size = 2 * game_size + 1
 
-
-    print("Preparing batches .. ")
-
-    batches = []
-    for _ in tqdm(range(n_batches)):
-        batch = random.sample(train_examples, batch_size)
-        x, p, v = [list(t) for t in zip(*batch)]
-        batches.append((np.vstack(x), np.vstack(p), v))
+    print(f"Batches are sampled from {len(all_indices):,} training examples (incl. augmentations) from the "
+            f"{len(training_set):,}/{game_buffer:,} most recent games.")
 
     # loss Functions and optimizer
-    CrossEntropyLoss = torch.nn.CrossEntropyLoss()
     MSELoss = torch.nn.MSELoss()
 
     optimizer = torch.optim.Adam(
@@ -73,19 +72,40 @@ def perform_model_training(model: AZDualRes, train_examples_per_game_augmented: 
     model.to(device)
 
     for i in tqdm(range(n_batches)):
-        optimizer.zero_grad()
+        # process each batch 1 at a time to avoid memory overload
+        batch_inds = random.sample(all_indices, batch_size)
+        
+        s_list = np.empty((batch_size, 8, feature_size, feature_size), dtype=np.float32)
+        p_list = np.empty((batch_size, n_actions), dtype=np.float32)
+        v_list = np.zeros((batch_size,), dtype=np.int8)
 
-        # to not run out of memory on gpu, move data to device sequentially
-        x, p_gt, v_gt = [torch.tensor(e, dtype=torch.float32, device=device) for e in batches[i]]  # batch = (x, p, v)
+        for ind, (i, j) in enumerate(batch_inds):
+            board, p, v = training_set[i][j]
+
+            s = model.encode(board[0], board[1])
+            s_list[ind] = s
+            p_list[ind] = p
+            v_list[ind] = v
+
+        x = torch.tensor(s_list, dtype=torch.float32, device=device)
+        p_gt = torch.tensor(p_list, dtype=torch.float32, device=device)
+        v_gt = torch.tensor(v_list, dtype=torch.float32, device=device)
+        
+        optimizer.zero_grad()
 
         p, v = model.forward(x)
 
         # loss and model & optimizer update
-        p_loss = CrossEntropyLoss(p, p_gt)
+        log_p = torch.log_softmax(p, dim=1)
+        p_loss = -(p_gt * log_p).sum(dim=1).mean()
         v_loss = MSELoss(v, v_gt)
         loss = p_loss + v_loss
         loss.backward()
         optimizer.step()
+        
+        # free memory
+        del x, p_gt, v_gt, p, v, loss, s_list, p_list, v_list
+        torch.cuda.empty_cache()
 
     # evaluate model on same data
     print("Evaluating model .. ")
@@ -97,11 +117,31 @@ def perform_model_training(model: AZDualRes, train_examples_per_game_augmented: 
         for i in tqdm(range(n_batches)):
             optimizer.zero_grad()
 
-            x, p_gt, v_gt = [torch.tensor(e, dtype=torch.float32, device=device) for e in batches[i]]  # batch = (x, p, v)
+            batch_inds = random.sample(all_indices, batch_size)
+        
+            s_list = np.empty((batch_size, 8, feature_size, feature_size), dtype=np.float32)
+            p_list = np.empty((batch_size, n_actions), dtype=np.float32)
+            v_list = np.zeros((batch_size,), dtype=np.int8)
+
+            for ind, (i, j) in enumerate(batch_inds):
+                board, p, v = training_set[i][j]
+
+                s = model.encode(board[0], board[1])
+                s_list[ind] = s
+                p_list[ind] = p
+                v_list[ind] = v
+
+            x = torch.tensor(s_list, dtype=torch.float32, device=device)
+            p_gt = torch.tensor(p_list, dtype=torch.float32, device=device)
+            v_gt = torch.tensor(v_list, dtype=torch.float32, device=device)
 
             p, v = model.forward(x)
-            p_loss += CrossEntropyLoss(p, p_gt)
+            log_p = torch.log_softmax(p, dim=1)
+            p_loss += -(p_gt * log_p).sum(dim=1).mean()
             v_loss += MSELoss(v, v_gt)
+            
+            del x, p_gt, v_gt, p, v, s_list, p_list, v_list
+            torch.cuda.empty_cache()
 
         p_loss = p_loss / n_batches
         v_loss = v_loss / n_batches
@@ -115,8 +155,9 @@ def perform_model_training(model: AZDualRes, train_examples_per_game_augmented: 
 def train_model(config: dict, checkpoint_index):
     mp.set_start_method("spawn", force=True)
     
-    training_set = []  # A list of lists where each list is a game's training data
+    training_set = []
     
+    # load the model config and training set if they already exist
     folder_path = f'./models/{config["name"]}'
     if os.path.isdir(folder_path):
         with open(f"{folder_path}/config.pkl", 'rb') as f:
@@ -127,8 +168,11 @@ def train_model(config: dict, checkpoint_index):
         os.mkdir(folder_path)
         with open(f'{folder_path}/config.pkl', 'wb') as f:
             pickle.dump(config, f)
+            
         with open(f'{folder_path}/training_set.pkl', 'wb') as f:
             pickle.dump(training_set, f)
+    
+    training_set = deque(training_set, maxlen=config["game_buffer"])
 
     game_size = config["game_size"]
     n_iterations = config["n_iterations"]
@@ -142,10 +186,10 @@ def train_model(config: dict, checkpoint_index):
     model_parameters = config["model_parameters"]
     optimizer_parameters = config["optimizer_parameters"]
 
-    # Use GPU if possible
+    # use GPU if possible
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Create the neural network
+    # create the neural network
     nnet = AZDualRes(
         game_size=game_size,
         device=device,
@@ -160,6 +204,7 @@ def train_model(config: dict, checkpoint_index):
     v_losses = []
     start_it = 1
 
+    # load model state if it exists
     if checkpoint_index:
         checkpoint = torch.load(f"{folder_path}/checkpoint_{checkpoint_index}.pth", weights_only=False)
         
@@ -168,52 +213,57 @@ def train_model(config: dict, checkpoint_index):
         v_losses = checkpoint['v_losses']
         start_it = len(p_losses)+1
 
-    for iteration in range(start_it, n_iterations+1):
-        print(f"\n#################### Iteration {iteration}/{n_iterations} #################### ")
+    # create a pool of subprocesses for multiprocessing
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        for iteration in range(start_it, n_iterations+1):
+            print(f"\n#################### Iteration {iteration}/{n_iterations} #################### ")
 
-        nnet.eval()
-        nnet.to(device)
+            nnet.eval()
+            nnet.to(device)
 
-        print("------------ Self-Play using MCTS ------------")
+            print("------------ Self-Play using MCTS ------------")
 
-        worker_args = [(game_size, self_play_batch_size, nnet.state_dict(), device, model_parameters, mcts_parameters) for i in range(self_play_batches)]
+            # define self-play arguments for subprocesses
+            model_state = nnet.state_dict()
+            worker_args = [(game_size, self_play_batch_size, model_state, device, model_parameters, mcts_parameters) for i in range(self_play_batches)]
 
-        new_training_data = process_map(
-            self_play_batch,
-            worker_args,
-            max_workers=num_workers,
-            tqdm_class=tqdm,
-            chunksize=1
-        )
+            # submit the subprocess jobs
+            futures = [executor.submit(self_play_batch, args) for args in worker_args]
 
-        for batch in new_training_data:
-            training_set.extend(batch)
+            # as self-play batches are completed, add them to the training set
+            for future in tqdm(as_completed(futures), total=len(futures)):
+                batch_result = future.result()
+                training_set.extend(batch_result)
 
-        while len(training_set) > game_buffer:
-            training_set.pop(0)
+                del batch_result
+                gc.collect()
+                torch.cuda.empty_cache()
 
-        print("\n---------- Neural Network Training -----------")
-        p_loss, v_loss = perform_model_training(
-            model=nnet,
-            train_examples_per_game_augmented=training_set,
-            game_buffer = game_buffer,
-            n_batches = n_batches,
-            batch_size = batch_size,
-            optimizer_parameters=optimizer_parameters,
-            device=device
-        )
-        nnet.to(device)
-        torch.cuda.empty_cache()
+            print("\n---------- Neural Network Training -----------")
+            p_loss, v_loss = perform_model_training(
+                model=nnet,
+                training_set=training_set,
+                game_buffer = game_buffer,
+                n_batches = n_batches,
+                batch_size = batch_size,
+                optimizer_parameters=optimizer_parameters,
+                device=device
+            )
+            nnet.to(device)
+            torch.cuda.empty_cache()
 
-        p_losses.append(p_loss)
-        v_losses.append(v_loss)
-        
-        checkpoint = {
-            'net_state_dict': nnet.state_dict(),
-            'p_losses': p_losses,
-            'v_losses': v_losses
-        }
+            p_losses.append(p_loss)
+            v_losses.append(v_loss)
 
-        torch.save(checkpoint, f'{folder_path}/checkpoint_{iteration}.pth')
-        with open(f'{folder_path}/training_set.pkl', 'wb') as f:
-            pickle.dump(training_set, f)
+            # update the checkpoint and save iteration results
+            checkpoint = {
+                'net_state_dict': nnet.state_dict(),
+                'p_losses': p_losses,
+                'v_losses': v_losses
+            }
+
+            gc.collect()
+
+            torch.save(checkpoint, f'{folder_path}/checkpoint_{iteration}.pth')
+            with open(f'{folder_path}/training_set.pkl', 'wb') as f:
+                pickle.dump(list(training_set), f)

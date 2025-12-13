@@ -18,9 +18,9 @@ class AZNode():
         move that was executed at the parent's position, resulting in this node's position s
     children : dict
         child nodes children[a] = child node after performing action a
-    Q : dict
+    Q : np.ndarray
         action values Q[a] = Q(s,a)
-    N : dict
+    N : np.ndarray
         visit counts N[a] = N(s,a)
     P : np.ndarray
         action values P(s,a) as returned by the neural network
@@ -39,9 +39,11 @@ class AZNode():
         self.s = s
 
         self.children = {}
-        self.Q = {}
-        self.N = {}
+        
+        n_actions = s.board.N_LINES
         self.P = None
+        self.Q = np.zeros(n_actions, dtype=np.float32)
+        self.N = np.zeros(n_actions, dtype=np.int32)
 
 class MCTS():
     """
@@ -86,22 +88,16 @@ class MCTS():
             dirichlet_noise[valid_moves] = np.random.dirichlet([self.dirichlet_alpha] * len(valid_moves))
 
             self.search(self.root, is_root=True, dirichlet_noise=dirichlet_noise)
-        
-        # make sure only valid moves are visited
-        assert set(list(self.root.N.keys())).issubset(set(s.getValidMoves()))
-        
-        # determine how many times each valid action was taken
-        counts = [self.root.N[a] if a in self.root.N else 0 for a in range(s.board.N_LINES)]
-        
-        # select the move with maximum visit count to give the strongest possible play (return value is one-hot vector)
-        if temp == 0:
-            probs = [0] * len(counts)
-            probs[np.array(counts).argmax()] = 1
-            return probs
 
-        # pi(a) ~ N(s,a)^(1/temp) while ensuring a probability distribution
-        probs = [n ** (1. / temp) for n in counts]
-        probs = [p / float(sum(probs)) for p in probs]
+        if temp == 0:
+            # select the move with maximum visit count to give the strongest possible play (return value is one-hot vector)
+            probs = np.zeros_like(self.root.N, dtype=np.float32)
+            probs[self.root.N.argmax()] = 1.0
+        else:
+            # pi(a) ~ N(s,a)^(1/temp) while ensuring a probability distribution
+            probs = self.root.N ** (1. / temp)
+            probs /= probs.sum()
+
         return probs
 
     def search(self, node: AZNode, is_root: bool = False, dirichlet_noise: np.ndarray = None) -> float:
@@ -129,16 +125,16 @@ class MCTS():
             # in case of a winner, current_player contains it (when capturing a box, the current player does not switch)
             return node.s.current_player * node.s.result
 
-        # reached a leaf (node which was not visited yet)
+        # this is a leaf node (evaluate it)
         if node.P is None:
             return self.evaluate(node)
 
         # node was visited before, select an action to continue traversal
         a = self.select(node, is_root, dirichlet_noise)
 
-        if a not in node.N:
-            # applying the selected move means approaching a leaf (node which was not visited yet)
-            child_s = copy.deepcopy(node.s)
+        if a not in node.children:
+            # applying the selected move means approaching a leaf
+            child_s = DotsAndBoxesGame.clone(node.s)
             child_s.playMove(a)
             child = AZNode(
                 parent=node,
@@ -159,15 +155,11 @@ class MCTS():
         v = v_child if node.s.current_player == child.s.current_player else -v_child
 
         # backup before returning v
-        if a not in node.N:
-            # leaf: node was visited for the first time
+        if node.N[a] == 0:
             node.Q[a] = v
             node.N[a] = 1
-
         else:
-            n = node.N[a]
-            q = node.Q[a]
-            node.Q[a] = (n * q + v) / (n + 1)  # Q = mean of v
+            node.Q[a] = (node.N[a] * node.Q[a] + v) / (node.N[a] + 1)
             node.N[a] += 1
 
         return v
@@ -193,14 +185,16 @@ class MCTS():
             move a for which Q(s,a) + U(s,a) is maximized
         """
         
+        valid_moves = node.s.getValidMoves()
+        
         # make sure valid moves exist
-        assert len(node.s.getValidMoves()) > 0
+        assert len(valid_moves) > 0
 
         maximum = float('-inf')
         a_max = -1
 
-        N_sum = sum(node.N.values())
-        N_sqrt = math.sqrt(N_sum)
+        N_sum = node.N.sum()
+        N_sqrt = math.sqrt(N_sum) if N_sum > 0 else 1.0
 
         # add dirichlet noise to the root's probabilities
         P = node.P if not is_root else \
@@ -209,26 +203,14 @@ class MCTS():
         # make sure the probabilities sum to 1
         assert abs(np.sum(P) - 1) < 1e-6, \
             f"is_root: {is_root}, sum of P: {np.sum(node.P)}, sum of P after adding dirichlet noise: {np.sum(P)}"
-
-        # find the action that maximises value
-        for a in node.s.getValidMoves():
-            # each move corresponds to a child node that may or may not have already been visited
-
-            p = P[a]
-            if a in node.N:
-                q = node.Q[a]
-                n = node.N[a]
-            else:
-                q = 0
-                n = 0
-
-            # upper confidence bound U(s, a) ~ P(s, a) / (1 + N(s, a))
-            u = self.c_puct * p * N_sqrt / (1 + n)
-
-            # maximize action value Q(s,a) + upper confidence bound U(s,a)
-            if q + u > maximum:
-                maximum = q + u
-                a_max = a
+        
+        # upper confidence bound U(s, a) ~ P(s, a) / (1 + N(s, a))
+        U = np.zeros_like(P)
+        U[valid_moves] = self.c_puct * P[valid_moves] * N_sqrt / (1 + node.N[valid_moves])
+        
+        # maximize action value Q(s,a) + upper confidence bound U(s,a)
+        a_vals = node.Q + U
+        a_max = int(valid_moves[np.argmax(a_vals[valid_moves])])
 
         return a_max
     

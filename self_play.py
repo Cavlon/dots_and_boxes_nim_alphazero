@@ -1,22 +1,24 @@
 import numpy as np
 import copy
+import torch
+
 from network import AZDualRes
 from game import DotsAndBoxesGame
 from mcts import MCTS
 
-def perform_self_play(game_size: int, model: AZDualRes, mcts_parameters: dict):
+def self_play(game_size: int, model: AZDualRes, mcts_parameters: dict, line_indices: np.ndarray):
     """
-    Perform a single game of self-play using MCTS. The data for the game is stored as (l, b, p, v) at each
-    time-step (i.e., each turn results in a training example), with l (lines vector) and b (boxes matrix)
-    representing the game state, and p (policy vector) and v (value scalar) being the parameters to be predicted.
+    Perform a single game of self-play using MCTS. The data for the game is stored as (s, p, v) at each
+    time-step (i.e., each turn results in a training example), with s (board) representing the game state, 
+    and p (policy vector) and v (value scalar) being the parameters to be predicted.
 
     Returns
     -------
-    train_examples : [[np.ndarray, np.ndarray, [float], float]]
-        list of training examples (l, b, p, v) (from the current player's POV)
+    train_examples : [[(np.ndarray, np.ndarray), [float], float]]
+        list of training examples (s, p, v) (from the current player's POV)
     """
 
-    game = DotsAndBoxesGame(game_size)
+    game = DotsAndBoxesGame(size=game_size)
     n_moves = 0
     train_examples = []
 
@@ -27,31 +29,25 @@ def perform_self_play(game_size: int, model: AZDualRes, mcts_parameters: dict):
         args=mcts_parameters
     )
 
-    # when more than temperature_move_threshold moves were performed during self-play, the temperature parameter
-    # is set from 1 to 0. This ensures that a diverse set of positions are encountered, as then the first moves
-    # during MCTS are selected proportionally to their visit count
+    # temperature adds variation to starting moves
     temperature_move_threshold = mcts_parameters["temperature_move_threshold"]
 
-    # iteration over time-steps t during the game. At each time-step, a MCTS is executed using the previous iteration
-    # of the neural network and a move is played by sampling the search probabilities
     while game.result is None:
         temp = 1 if n_moves < temperature_move_threshold else 0
         n_moves += 1
 
         # execute MCTS for next move
         probs = mcts.getProbs(temp=temp)
-
-        train_examples.append([
-            game.getCanonicalBoard(),
-            probs,
-            game.current_player  # correct v is determined later
-        ])
+        
+        # add the board and all its symmetries to the training set
+        canonical_board = game.getCanonicalBoard()
+        symmetries = DotsAndBoxesGame.getSymmetries(canonical_board[0], canonical_board[1])
+        policy_symmetries = DotsAndBoxesGame.getLineSymmetries(np.asarray(probs))
+        
+        train_examples.extend([[(l_sym, b_sym), p_sym, game.current_player] for l_sym, b_sym, p_sym in zip(symmetries[0], symmetries[1], policy_symmetries)])
 
         # sample and play move from probability distribution
-        move = np.random.choice(
-            a=list(range(game.board.N_LINES)),
-            p=probs
-        )
+        move = np.random.choice(line_indices, p=probs)
         game.playMove(move)
 
         # child node corresponding to the played action becomes the new root. The subtree below this child is
@@ -59,32 +55,22 @@ def perform_self_play(game_size: int, model: AZDualRes, mcts_parameters: dict):
         mcts.root = mcts.root.children[move]
 
     # determine correct value v for the activate player in each example
-    for i, (_, _, current_player) in enumerate(train_examples):
+    for i, (_, _, current_player) in enumerate(train_examples):       
         if current_player == game.result:
             train_examples[i][-1] = 1  # the player that made this move won
+        elif game.result == 0:
+            train_examples[i][-1] = 0  # the game drew
         else:
             train_examples[i][-1] = -1  # the player that made this move lost
 
     return train_examples
 
-def self_play(game_size, nnet, mcts_parameters):
-
-    new_game = perform_self_play(game_size, nnet, mcts_parameters)  # play a game and get training data
-    new_game_augmented = []
-
-    for board, p, v in new_game:  # get symmetries for each turn
-        symmetries = DotsAndBoxesGame.getSymmetries(board[0], board[1])
-        policy_symmeteries = DotsAndBoxesGame.getLineSymmetries(np.asarray(p))
-
-        for i in range(8):
-            new_game_augmented.append([(symmetries[0][i], symmetries[1][i]), policy_symmeteries[i], v])
-    
-    return new_game_augmented
-
 def self_play_batch(args):
+    # initialise the neural network once and play a small batch of games with it (for multiprocessing)
     results = []
     
     game_size, batch_size, nnet_state, device, model_parameters, mcts_parameters = args
+    line_indices = np.arange(DotsAndBoxesGame(game_size).board.N_LINES)
     
     nnet = AZDualRes(
         game_size=game_size,
@@ -96,6 +82,7 @@ def self_play_batch(args):
     nnet.eval()
     nnet.to(device)
     
-    for i in range(batch_size):
-        results.append(self_play(game_size, nnet, mcts_parameters))
+    with torch.no_grad():
+        for i in range(batch_size):
+            results.append(self_play(game_size, nnet, mcts_parameters, line_indices))
     return results
