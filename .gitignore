@@ -1,0 +1,5 @@
+venv
+models
+__pycache__
+checks.txt
+nim.txt
