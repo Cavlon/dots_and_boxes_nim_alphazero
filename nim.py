@@ -1,242 +1,103 @@
-import itertools
-import numpy as np
-
 from game import Board
+from nim_utils import transformation_maps, line_groups, grouped_transformations, canonical_transformations, generate_box_checks, distribution_iterator, group_combinations_iterator, next_pos_iterator, apply_map, canonise_pos, mex
 
-def mex(values):
-    mex_val = 0
-    while mex_val in values:
-        mex_val += 1
-    return mex_val
+def calculate_nim(board, groups, group_map, group_sizes, check_A, check_B, canon_trans, trans_maps):
 
-def transformation_maps(board: Board):
-    num_lines = board.N_LINES
-    size = board.SIZE
-    half = num_lines // 2
+    # used to map bits to apply transformations
+    h_flip, v_flip, rot90 = trans_maps
 
-    h_flip = [0] * num_lines
-    v_flip = [0] * num_lines
-    rot_90 = [0] * num_lines
-
-    for row in range(size + 1):
-        for col in range(size + 1):
-            # Transform Horizontal Lines
-            if col < size:
-                ind = row * size + col
-                h_flip[ind] = row * size + (size - col - 1)
-                v_flip[ind] = (size - row) * size + col
-
-                rot_90[ind] = half + (size-row) * size + col
-            
-            # Transform Vertical Lines
-            if row < size:
-                ind = half + col * size + row
-                h_flip[ind] = half + (size - col) * size + row
-                v_flip[ind] = half + col * size + (size - row - 1)
-  
-                rot_90[ind] = col * size + (size - row - 1)
-                
-    return h_flip, v_flip, rot_90
-
-def line_groups(maps, num_lines):
-    h_flip, v_flip, rot90 = maps
-
-    groups = []
-    processed = set()
-    group_map = dict()
-    group_ind = -1
-    
-    for i in range(num_lines):
-        if i not in processed:
-            group_ind += 1
-            ind = i
-            visited = set()
-
-            for j in range(2):
-                h_ind = h_flip[ind]
-                v_ind = v_flip[ind]
-
-                visited.add(ind)
-                visited.add(h_ind)
-                visited.add(v_ind)
-
-                processed.add(ind)
-                processed.add(h_ind)
-                processed.add(v_ind)
-
-                group_map[ind] = group_ind
-                group_map[h_ind] = group_ind
-                group_map[v_ind] = group_ind
-
-                ind = rot90[ind]
-            
-            visited.add(ind)
-            visited.add(rot90[ind])
-
-            processed.add(ind)
-            processed.add(rot90[ind])
-
-            group_map[ind] = group_ind
-            group_map[rot90[ind]] = group_ind
-
-            groups.append(sorted(list(visited)))
-    
-    return groups, group_map
-
-def grouped_transformations(groups, group_map, maps, num_lines):
-
-    h_flip, v_flip, rot90 = maps
-
-    g_h_flip = [0] * num_lines
-    g_v_flip = [0] * num_lines
-    g_rot_90 = [0] * num_lines
-
-    for i in range(num_lines):
-        group_ind = group_map[i]
-        
-        trans_ind = h_flip[i]
-        g_h_flip[i] = groups[group_ind].index(trans_ind)
-
-        trans_ind = v_flip[i]
-        g_v_flip[i] = groups[group_ind].index(trans_ind)
-
-        trans_ind = rot90[i]
-        g_rot_90[i] = groups[group_ind].index(trans_ind)
-    
-    return g_h_flip, g_v_flip, g_rot_90
-
-def apply_group_map(state, trans_map, group_len):
-    new_s = 0
-    for bit in range(group_len):
-        if (state >> bit) & 1:
-            new_s |= (1 << trans_map[groups[1][bit]])
-    return new_s
-
-def canonical_transformations(groups, maps):
-    h_flip, v_flip, rot90 = maps
-
-    canon_trans = {0:0}
-    
-    group_len = len(groups[1])
-
-    for i in range(1, group_len+1):
-        canon = (1 << i) - 1
-        canon_trans[i] = 0
-
-        h_pos = apply_group_map(canon, h_flip, group_len)
-        v_pos = apply_group_map(canon, v_flip, group_len)
-        rot_pos = apply_group_map(canon, rot90, group_len)
-        hrot_pos = apply_group_map(rot_pos, h_flip, group_len)
-        vrot_pos = apply_group_map(rot_pos, v_flip, group_len)
-        rot2_pos = apply_group_map(rot_pos, rot90, group_len)
-        rot3_pos = apply_group_map(rot2_pos, rot90, group_len)
-
-        canon_trans[h_pos] = 1
-        canon_trans[v_pos] = 2
-        canon_trans[rot_pos] = 3
-        canon_trans[hrot_pos] = 4
-        canon_trans[vrot_pos] = 5
-        canon_trans[rot2_pos] = 6
-        canon_trans[rot3_pos] = 7
-
-        # print(f"canon: {bin(canon)[2:]}     h_flip: {bin(h_pos)[2:]}    v_flip: {bin(v_pos)[2:]}    rot: {bin(rot_pos)[2:]}")
-    
-    return canon_trans        
-
-def generate_box_checks(board: Board):
-    
-    # Initialize with all bits set (1 means line is missing)
-    n_lines = board.N_LINES
-    size = board.SIZE
-    check_A = [None] * n_lines
-    check_B = [None] * n_lines
-
-    # iterate through each box
-    for row in range(size):
-        for col in range(size):
-            # [top, bottom, left, right] lines of a box
-            lines = board.box_to_lines[row * size + col]
-            
-            # iterate through each line
-            for i in range(4):
-                current_line = lines[i]
-                mask = 0
-
-                # add the other 3 lines to the mask
-                for j in range(4):
-                    if i != j:
-                        mask |= (1 << lines[j])
-                
-                # a is if box is top or left, b is if box is bottom or right
-                if i % 2 == 0:
-                    check_B[current_line] = mask
-                else:
-                    check_A[current_line] = mask
-                    
-    return check_A, check_B
-
-def calculate_nim(board, check_A, check_B):
+    # maps boards to nimvalues
     saved = {0: 0} # full board has value 0
+    curr_saved = dict()
 
     size = board.SIZE
     num_lines = board.N_LINES
-
-    indices = range(num_lines)
     
     # Progress from 1 line missing up to all lines missing
     for missing in range(1, num_lines + 1):
         print(missing)
-        for combination in itertools.combinations(indices, missing):
-            skip_mex = False
 
-            # 1 = missing, 0 = present
-            pos = 0
-            for index in combination:
-                pos |= (1 << index)
-            
-            follower_values = []
-            for line in combination: # Only try lines that are missing
-                next_pos = pos ^ (1 << line)
+        # find all ways to distribute n missing lines across the groups
+        distributions = distribution_iterator(missing, group_sizes)
+
+        for distribution in distributions:
+
+            # find all combinations of bits that adhere to the line distribution to form a position
+            group_combinations = group_combinations_iterator(distribution, group_sizes, canon_trans)
+
+            for combination in group_combinations:
+                skip_mex = False
+
+                # read the combination to create the position bitstring
+                pos = 0
+                shift = 0
+                for i in range(len(groups)):
+                    pos |= (combination[i] << shift)
+                    shift += group_sizes[i]
                 
-                # Box check: if (state & mask) == 0, the other 3 lines were already 0
-                capture_box = False
-                edge = False
+                follower_values = set()
 
-                if check_A[line]:
-                    res_A = pos & check_A[line]
-                    if res_A == 0:
-                        capture_box = True
-                else:
-                    edge = True
+                # find all possible next moves
+                follower_moves = next_pos_iterator(pos, groups, group_sizes)
+
+                for next_pos, line, pivot_change in follower_moves:
+                     
+                    capture_box = False
+
+                    # if the line is on an edge then the move can't be loony
+                    edge = False
+
+                    # box check: if (pos & check) == 0, the other 3 lines are already 0 (present)
+                    if check_A[line]:
+                        res_A = pos & check_A[line]
+                        if res_A == 0:
+                            capture_box = True
+                    else:
+                        edge = True
+                    
+                    if check_B[line]:
+                        res_B = pos & check_B[line]
+                        if res_B == 0:
+                            capture_box = True
+                    else:
+                        edge = True
+
+                    if capture_box:
+                        if not edge:
+                            # this checks if the box check that didn't capture the box still detected 2 lines present
+                            # if it did then this move captured a box in a chain and thus entering this position is loony
+                            if (res_A > 0 and (res_A & (res_A - 1)) == 0) or (res_B > 0 and (res_B & (res_B - 1)) == 0):
+                                curr_saved[pos] = -1
+                                skip_mex = True
+                                break
+
+                        # if the addition of the line changed the pivot group, it may need to be transformed to return to a canonical position
+                        if pivot_change:
+                            next_pos = canonise_pos(next_pos, group_sizes[0], canon_trans, h_flip, v_flip, rot90)
+
+                        # if a box was captured and it isn't loony then value is the same as the position of the board after the capture
+                        curr_saved[pos] = saved[next_pos]
+                        skip_mex = True
+                        break
+                    else:
+                        # if the addition of the line changed the pivot group, it may need to be transformed to return to a canonical position
+                        if pivot_change:
+                            next_pos = canonise_pos(next_pos, group_sizes[0], canon_trans, h_flip, v_flip, rot90)
+
+                        follower_values.add(saved[next_pos])
                 
-                if check_B[line]:
-                    res_B = pos & check_B[line]
-                    if res_B == 0:
-                        capture_box = True
-                else:
-                    edge = True
-
-                        
-                
-                if capture_box:
-                    if not edge:
-                        if (res_A > 0 and (res_A & (res_A - 1)) == 0) or (res_B > 0 and (res_B & (res_B - 1)) == 0):
-                            saved[pos] = -1
-                            skip_mex = True
-                            break
-
-                    # Extra turn: value is the nim-value of the resulting state
-                    saved[pos] = saved[next_pos]
-                    skip_mex = True
-                    break
-                else:
-                    # Normal move: standard nim-value logic
-                    follower_values.append(saved[next_pos])
-            
-            if not skip_mex:
-                saved[pos] = mex(follower_values)
-            
-    return saved
+                # if no boxes were captured then the value is the mex of all follower boards
+                if not skip_mex:
+                    curr_saved[pos] = mex(follower_values)
+        
+        # write the dictionary to the disk
+        with open(f'nim/nim_{missing}.txt', 'w') as r:
+            for key, value in curr_saved.items():
+                r.write(f"{bin(key)[2:]}: {value}\n")
+        
+        # remove the old dictionary from memory
+        saved = curr_saved
+        curr_saved = dict()
 
 def main():
     size = 2
@@ -250,20 +111,25 @@ def main():
     print(groups)
     print(group_map)
 
-    g_trans_maps = grouped_transformations(groups, group_map, trans_maps, N_LINES)
+    group_sizes = [len(groups[i]) for i in range(len(groups))]
+    print(group_sizes)
+
+    g_trans_maps = grouped_transformations(groups, trans_maps, N_LINES)
     print(g_trans_maps)
 
-    canonical_transformations(groups, g_trans_maps)
+    pivot_group = 0
 
-    # with open('checks.txt', 'w') as r:
-    #     a, b = generate_box_checks(board)
-    #     for i in range(N_LINES):
-    #         r.write(f"{i}:  check a: {bin(a[i]) if a[i] else a[i]}   check b: {bin(b[i]) if b[i] else b[i]}\n")
+    with open('canon.txt', 'w') as r:
+        canon_map = canonical_transformations(groups, pivot_group, g_trans_maps)
+        for key, value in canon_map.items():
+            r.write(f"{bin(key)[2:]}: {value}\n")
 
-    # with open('nim.txt', 'w') as r:
-    #     saved = calculate_nim(board, a, b)
-    #     for key, value in saved.items():
-    #         r.write(f"{bin(key)[2:]}: {value}\n")
+    with open('checks.txt', 'w') as r:
+        check_a, check_b = generate_box_checks(board, groups, group_map)
+        for i in range(N_LINES):
+            r.write(f"{i}:  check a: {bin(check_a[i])[2:] if check_a[i] else check_a[i]}   check b: {bin(check_b[i])[2:] if check_b[i] else check_b[i]}\n")
+
+    calculate_nim(board, groups, group_map, group_sizes, check_a, check_b, canon_map, g_trans_maps)
 
 if __name__ == "__main__":
     main()

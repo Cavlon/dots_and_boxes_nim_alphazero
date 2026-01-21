@@ -3,3 +3,7 @@ models
 __pycache__
 checks.txt
 nim.txt
+canon.txt
+nim
+nim_naive.py
+test.py
