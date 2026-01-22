@@ -55,7 +55,6 @@ def line_groups(maps, num_lines):
 
     groups = []
     processed = set()
-    group_map = dict()  # maps a line index to its corresponding group
     group_ind = -1
     
     for i in range(num_lines):
@@ -78,10 +77,6 @@ def line_groups(maps, num_lines):
                 processed.add(h_ind)
                 processed.add(v_ind)
 
-                group_map[ind] = group_ind
-                group_map[h_ind] = group_ind
-                group_map[v_ind] = group_ind
-
                 ind = rot90[ind]
             
             visited.add(ind)
@@ -90,12 +85,26 @@ def line_groups(maps, num_lines):
             processed.add(ind)
             processed.add(rot90[ind])
 
-            group_map[ind] = group_ind
-            group_map[rot90[ind]] = group_ind
-
             groups.append(sorted(list(visited)))
     
-    return groups, group_map
+    # move the corners to the end and group them by corner
+    corners_group = groups.pop(0)
+    corners = [
+        corners_group[0],
+        corners_group[4],
+        corners_group[6],
+        corners_group[1],
+        corners_group[3],
+        corners_group[7],
+        corners_group[5],
+        corners_group[2],
+    ]
+
+    # ensure the largest non-corner group is the pivot
+    groups.sort(key=len, reverse=True)
+    groups.append(corners)
+
+    return groups
 
 def grouped_transformations(groups, maps, num_lines):
     '''
@@ -108,10 +117,11 @@ def grouped_transformations(groups, maps, num_lines):
     g_rot_90 = [0] * num_lines
 
     # maps line indices to their bit positions in the grouped bitstring
-    flattened = [ind for group in groups for ind in group]
+    flattened = [ind for group in groups[:-1] for ind in group]
+    shift = len(flattened)
 
     # find the new transformed indices for each line in the new grouped bitstring
-    for i in range(len(flattened)):
+    for i in range(shift):
         trans_ind = h_flip[flattened[i]]
         g_h_flip[i] = flattened.index(trans_ind)
 
@@ -121,6 +131,25 @@ def grouped_transformations(groups, maps, num_lines):
         trans_ind = rot90[flattened[i]]
         g_rot_90[i] = flattened.index(trans_ind)
     
+    # the corners represent ternary states so the transformations are slightly different
+    corners = groups[-1]
+    for i in range(8):
+        g_rot_90[shift + i] = shift + (i + 2) % 8
+    
+    for i in range(2):
+        g_h_flip[shift + i] = shift + i + 2
+        g_h_flip[shift + i + 2] = shift + i
+
+        g_v_flip[shift + i] = shift + (i - 2) % 8
+        g_v_flip[shift + (i - 2) % 8] = shift + i
+
+    for i in range(2):
+        g_h_flip[shift + 4 + i] = shift + i + 6
+        g_h_flip[shift + i + 6] = shift + i + 4
+
+        g_v_flip[shift + 4 + i] = shift + i + 2
+        g_v_flip[shift + i + 2] = shift + 4 + i
+
     return g_h_flip, g_v_flip, g_rot_90
 
 def apply_map(pos, trans_map):
@@ -133,7 +162,7 @@ def apply_map(pos, trans_map):
             new_pos |= (1 << trans_map[bit])
     return new_pos
 
-def canonical_transformations(groups, pivot_ind, maps):
+def canonical_transformations(groups, maps):
     '''
     Iterates through each possible combination of group bits in the pivot and applies every transformation to them
     The variant with the lowest numerical value is the canonical one
@@ -151,7 +180,7 @@ def canonical_transformations(groups, pivot_ind, maps):
 
     canon_trans = {0:0}
     
-    group_len = len(groups[pivot_ind])
+    group_len = len(groups[0])
 
     # iterate through each combination of bits in the pivot
     for i in range(1, 1 << group_len):
@@ -208,7 +237,7 @@ def canonise_pos(pos, pivot_size, canon_trans, h_flip, v_flip, rot90):
                 return apply_map(pos, rot90)
             return pos
 
-def generate_box_checks(board: Board, groups, group_map):
+def generate_box_checks(board: Board, groups):
     '''
     Constructs 2 masks for each line to check the other surrounding lines for each box it is attached to
     Lines on edges are only attached to 1 box so 1 mask will be None
@@ -241,7 +270,13 @@ def generate_box_checks(board: Board, groups, group_map):
                 # add the other 3 lines to the mask
                 for j in range(4):
                     if i != j:
-                        group_ind = group_map[lines[j]]
+                        group_ind = 0
+
+                        for k in range(len(groups)):
+                            if lines[j] in groups[k]:
+                                group_ind = k
+                                break
+
                         mask |= (1 << shifts[group_ind] + groups[group_ind].index(lines[j]))
                 
                 # a is if box is top or left, b is if box is bottom or right
@@ -305,11 +340,31 @@ def group_combinations_iterator(distribution, group_bits, canon_trans):
     for combination in gospers_hack(distribution[0], group_bits[0]):
         if canon_trans[combination] == 0:
             pivot_combinations.append(combination)
+    
+    # the corners are ternary states so bit iteration isn't valid
+    corner_combinations = []
+
+    # distribute the missing lines across the corners
+    corner_distributions = distribution_iterator(distribution[-1], [2, 2, 2, 2])
+    for corner_distribution in corner_distributions:
+        combination = 0
+
+        # build the bit combination
+        for i in range(4):
+            corner = corner_distribution[i]
+
+            # if 2 lines were assigned, set 11 to the bits to denote both lines being present
+            if corner == 2:
+                corner = 3
+            combination |= corner << (i * 2)
+        corner_combinations.append(combination)
 
     # each list holds all the possible values for a group that adhere to the distribution of 1s
     group_combinations = [pivot_combinations]
-    for ones, bits in zip(distribution[1:], group_bits[1:]):
+    for ones, bits in zip(distribution[1:-1], group_bits[1:-1]):
         group_combinations.append(list(gospers_hack(ones, bits)))
+    
+    group_combinations.append(corner_combinations)
 
     # iterate through the cartesian product for all possible values each group could take
     for combination in itertools.product(*group_combinations):
@@ -319,7 +374,13 @@ def next_pos_iterator(pos, groups, group_sizes):
     '''
     Iterates through every position yielded from removing a single 1
     '''
-    temp = pos
+
+    # ignore the corner group when iterating through the bits
+    pos_length = sum(group_sizes)
+    corner_shift = pos_length - group_sizes[-1]
+    no_corner_mask = (1 << corner_shift) - 1
+
+    temp = pos & no_corner_mask
 
     # while there are still 1s that can be removed
     while temp > 0:
@@ -344,3 +405,16 @@ def next_pos_iterator(pos, groups, group_sizes):
         # remove that 1 from the position, marking it as no longer missing
         yield pos ^ missing, line, pivot_change
         temp &= (temp - 1)
+    
+    # iterate through each corner, decrementing each ternary state by 1
+    for i in range(0, 8, 2):
+        shift = corner_shift + i
+
+        # extract the corner state
+        state = (pos >> shift) & 3
+        
+        # 11 should become 01, not 10
+        if state == 3:
+            yield pos - (2 << shift), groups[-1][i + 1], False
+        elif state == 1:
+            yield pos - (1 << shift), groups[-1][i], False

@@ -1,7 +1,7 @@
 from game import Board
 from nim_utils import transformation_maps, line_groups, grouped_transformations, canonical_transformations, generate_box_checks, distribution_iterator, group_combinations_iterator, next_pos_iterator, apply_map, canonise_pos, mex
 
-def calculate_nim(board, groups, group_map, group_sizes, check_A, check_B, canon_trans, trans_maps):
+def calculate_nim(board, groups, group_sizes, check_A, check_B, canon_trans, trans_maps):
 
     # used to map bits to apply transformations
     h_flip, v_flip, rot90 = trans_maps
@@ -100,16 +100,15 @@ def calculate_nim(board, groups, group_map, group_sizes, check_A, check_B, canon
         curr_saved = dict()
 
 def main():
-    size = 2
+    size = 3
     N_LINES = 2 * size * (size + 1)
     print(N_LINES)
     
     board = Board(size)
     trans_maps = transformation_maps(board)
 
-    groups, group_map = line_groups(trans_maps, N_LINES)
+    groups = line_groups(trans_maps, N_LINES)
     print(groups)
-    print(group_map)
 
     group_sizes = [len(groups[i]) for i in range(len(groups))]
     print(group_sizes)
@@ -117,19 +116,17 @@ def main():
     g_trans_maps = grouped_transformations(groups, trans_maps, N_LINES)
     print(g_trans_maps)
 
-    pivot_group = 0
-
     with open('canon.txt', 'w') as r:
-        canon_map = canonical_transformations(groups, pivot_group, g_trans_maps)
+        canon_map = canonical_transformations(groups, g_trans_maps)
         for key, value in canon_map.items():
             r.write(f"{bin(key)[2:]}: {value}\n")
 
     with open('checks.txt', 'w') as r:
-        check_a, check_b = generate_box_checks(board, groups, group_map)
+        check_a, check_b = generate_box_checks(board, groups)
         for i in range(N_LINES):
             r.write(f"{i}:  check a: {bin(check_a[i])[2:] if check_a[i] else check_a[i]}   check b: {bin(check_b[i])[2:] if check_b[i] else check_b[i]}\n")
 
-    calculate_nim(board, groups, group_map, group_sizes, check_a, check_b, canon_map, g_trans_maps)
+    calculate_nim(board, groups, group_sizes, check_a, check_b, canon_map, g_trans_maps)
 
 if __name__ == "__main__":
     main()
