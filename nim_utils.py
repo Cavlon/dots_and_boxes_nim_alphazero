@@ -1,4 +1,3 @@
-import itertools
 import numpy as np
 
 from game import Board
@@ -330,9 +329,25 @@ def gospers_hack(ones, bits):
         r = x + c
         c = (((r ^ x) >> 2) // c) | r
 
+# Based on itertools.product()
+def cart_product_reverse(*iterables):
+    '''
+    Finds the cartesian product of a set of iterables
+    Iterates through leftmost iterables before right ones
+    '''
+    pools = [tuple(pool) for pool in iterables]
+
+    result = [[]]
+    for pool in pools[::-1]:
+        result = [[y]+x for x in result for y in pool]
+
+    for prod in result:
+        yield tuple(prod)
+
 def group_combinations_iterator(distribution, group_bits, canon_trans):
     '''
     Iterates through every combination of bits where the number of 1s per group adheres to the distribution
+    The combinations are returned in order from lowest numerical value to highest
     '''
 
     # only canonical positions are considered
@@ -349,15 +364,17 @@ def group_combinations_iterator(distribution, group_bits, canon_trans):
     for corner_distribution in corner_distributions:
         combination = 0
 
-        # build the bit combination
+        # build the bit combination from smallest value to highest
         for i in range(4):
-            corner = corner_distribution[i]
+            corner = corner_distribution[3-i]
 
             # if 2 lines were assigned, set 11 to the bits to denote both lines being present
             if corner == 2:
                 corner = 3
-            combination |= corner << (i * 2)
+            combination |= corner << ((3-i) * 2)
         corner_combinations.append(combination)
+
+    corner_combinations.sort()
 
     # each list holds all the possible values for a group that adhere to the distribution of 1s
     group_combinations = [pivot_combinations]
@@ -367,7 +384,7 @@ def group_combinations_iterator(distribution, group_bits, canon_trans):
     group_combinations.append(corner_combinations)
 
     # iterate through the cartesian product for all possible values each group could take
-    for combination in itertools.product(*group_combinations):
+    for combination in cart_product_reverse(*group_combinations):
         yield combination
 
 def next_pos_iterator(pos, groups, group_sizes):

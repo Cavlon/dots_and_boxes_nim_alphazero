@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from game import Board
 from nim_utils import transformation_maps, line_groups, grouped_transformations, canonical_transformations, generate_box_checks, distribution_iterator, group_combinations_iterator, next_pos_iterator, apply_map, canonise_pos, mex
 
@@ -21,6 +23,8 @@ def calculate_nim(board, groups, group_sizes, check_A, check_B, canon_trans, tra
         distributions = distribution_iterator(missing, group_sizes)
 
         for distribution in distributions:
+
+            dist_dict = dict()
 
             # find all combinations of bits that adhere to the line distribution to form a position
             group_combinations = group_combinations_iterator(distribution, group_sizes, canon_trans)
@@ -68,6 +72,7 @@ def calculate_nim(board, groups, group_sizes, check_A, check_B, canon_trans, tra
                             # if it did then this move captured a box in a chain and thus entering this position is loony
                             if (res_A > 0 and (res_A & (res_A - 1)) == 0) or (res_B > 0 and (res_B & (res_B - 1)) == 0):
                                 curr_saved[pos] = -1
+                                dist_dict[pos] = -1
                                 skip_mex = True
                                 break
 
@@ -77,6 +82,7 @@ def calculate_nim(board, groups, group_sizes, check_A, check_B, canon_trans, tra
 
                         # if a box was captured and it isn't loony then value is the same as the position of the board after the capture
                         curr_saved[pos] = saved[next_pos]
+                        dist_dict[pos] = saved[next_pos]
                         skip_mex = True
                         break
                     else:
@@ -89,18 +95,39 @@ def calculate_nim(board, groups, group_sizes, check_A, check_B, canon_trans, tra
                 # if no boxes were captured then the value is the mex of all follower boards
                 if not skip_mex:
                     curr_saved[pos] = mex(follower_values)
+                    dist_dict[pos] = mex(follower_values)
+            
+            path = f"nim/{missing}/"
+            for i in range(len(distribution)-2):
+                path += f"{str(distribution[i])}/"
+            path += f"{distribution[-2]}.txt"
+            path = Path(path)
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+            # with path.open("w", encoding="utf-8") as r:
+            #     for key, value in dist_dict.items():
+            #         r.write(f"{key}: {value}\n")
+            
+            with path.open("w", encoding="utf-8") as r:
+                for key, value in dist_dict.items():
+                    r.write(f"{bin(key)[2:]}: {value}\n")
         
         # write the dictionary to the disk
-        with open(f'nim/nim_{missing}.txt', 'w') as r:
-            for key, value in curr_saved.items():
-                r.write(f"{bin(key)[2:]}: {value}\n")
+        # with open(f'nim/nim_{missing}.txt', 'w') as r:
+        #     for key, value in curr_saved.items():
+        #         r.write(f"{bin(key)[2:]}: {value}\n")
+
+        # with open(f'nim/nim_{missing}.txt', 'w') as r:
+        #     for key, value in curr_saved.items():
+        #         r.write(f"{key}: {value}\n")
         
         # remove the old dictionary from memory
         saved = curr_saved
         curr_saved = dict()
 
 def main():
-    size = 3
+    size = 2
     N_LINES = 2 * size * (size + 1)
     print(N_LINES)
     
