@@ -344,10 +344,9 @@ def cart_product_reverse(*iterables):
     for prod in result:
         yield tuple(prod)
 
-def group_combinations_iterator(distribution, group_bits, canon_trans):
+def group_combinations(distribution, group_bits, canon_trans):
     '''
-    Iterates through every combination of bits where the number of 1s per group adheres to the distribution
-    The combinations are returned in order from lowest numerical value to highest
+    Finds all possible combinations of bits for each group where the number of 1s adheres to the distribution
     '''
 
     # only canonical positions are considered
@@ -382,10 +381,37 @@ def group_combinations_iterator(distribution, group_bits, canon_trans):
         group_combinations.append(list(gospers_hack(ones, bits)))
     
     group_combinations.append(corner_combinations)
+    return group_combinations
+
+def combinations_iterator(group_combinations):
+    '''
+    Iterates through every combination of bits where the number of 1s per group adheres to the distribution
+    The combinations are returned in order from lowest numerical value to highest
+    '''
 
     # iterate through the cartesian product for all possible values each group could take
     for combination in cart_product_reverse(*group_combinations):
         yield combination
+
+def find_pos_ind(pos, group_combinations, group_sizes):
+    '''
+    Finds the index of a position in a distribution's dictionary array
+    '''
+    multipliers = []
+    mult = 1
+    for i in range(len(group_sizes)):
+        multipliers.append(mult)
+        mult *= len(group_combinations[i])
+
+    ind = 0
+    shift = 0
+    for i in range(len(group_sizes)):
+        group = (pos >> shift) & ((1 << group_sizes[i]) - 1)
+        shift += group_sizes[i]
+
+        ind += group_combinations[i].index(group) * multipliers[i]
+    
+    return ind
 
 def next_pos_iterator(pos, groups, group_sizes):
     '''
@@ -408,10 +434,12 @@ def next_pos_iterator(pos, groups, group_sizes):
 
         # find what line index that 1 corresponds to
         ind = missing.bit_length() - 1
+        group_ind = 0
         for i in range(len(group_sizes)):
             if ind >= group_sizes[i]:
                 ind -= group_sizes[i]
             else:
+                group_ind = i
                 line = groups[i][ind]
 
                 # if the line added is in the pivot group, label the pivot as being changed
@@ -420,7 +448,7 @@ def next_pos_iterator(pos, groups, group_sizes):
                 break
 
         # remove that 1 from the position, marking it as no longer missing
-        yield pos ^ missing, line, pivot_change
+        yield pos ^ missing, line, group_ind, pivot_change
         temp &= (temp - 1)
     
     # iterate through each corner, decrementing each ternary state by 1
@@ -432,6 +460,6 @@ def next_pos_iterator(pos, groups, group_sizes):
         
         # 11 should become 01, not 10
         if state == 3:
-            yield pos - (2 << shift), groups[-1][i + 1], False
+            yield pos - (2 << shift), groups[-1][i + 1], len(groups)-1, False
         elif state == 1:
-            yield pos - (1 << shift), groups[-1][i], False
+            yield pos - (1 << shift), groups[-1][i], len(groups)-1, False

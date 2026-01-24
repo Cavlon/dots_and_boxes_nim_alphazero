@@ -1,7 +1,10 @@
+import numpy as np
+import pickle
+
 from pathlib import Path
 
 from game import Board
-from nim_utils import transformation_maps, line_groups, grouped_transformations, canonical_transformations, generate_box_checks, distribution_iterator, group_combinations_iterator, next_pos_iterator, apply_map, canonise_pos, mex
+from nim_utils import transformation_maps, line_groups, grouped_transformations, canonical_transformations, generate_box_checks, distribution_iterator, group_combinations, combinations_iterator, find_pos_ind, next_pos_iterator, apply_map, canonise_pos, mex
 
 def calculate_nim(board, groups, group_sizes, check_A, check_B, canon_trans, trans_maps):
 
@@ -9,11 +12,22 @@ def calculate_nim(board, groups, group_sizes, check_A, check_B, canon_trans, tra
     h_flip, v_flip, rot90 = trans_maps
 
     # maps boards to nimvalues
-    saved = {0: 0} # full board has value 0
-    curr_saved = dict()
+    dist_dict = np.zeros((1,), dtype=np.int8)
 
     size = board.SIZE
     num_lines = board.N_LINES
+
+    # save the full board
+    path = f"nim/0/"
+    for i in range(len(groups)-2):
+        path += f"0/"
+    path += f"0.bin"
+    path_obj = Path(path)
+
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(path + '_p', 'wb') as handle:
+        pickle.dump(dist_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
     
     # Progress from 1 line missing up to all lines missing
     for missing in range(1, num_lines + 1):
@@ -27,9 +41,18 @@ def calculate_nim(board, groups, group_sizes, check_A, check_B, canon_trans, tra
             dist_dict = dict()
 
             # find all combinations of bits that adhere to the line distribution to form a position
-            group_combinations = group_combinations_iterator(distribution, group_sizes, canon_trans)
+            group_combs = group_combinations(distribution, group_sizes, canon_trans)
+            combinations = combinations_iterator(group_combs)
 
-            for combination in group_combinations:
+            # calculate the size of the dictionary from all possible combinations
+            dict_size = 1
+            for comb in group_combs:
+                dict_size *= len(comb)
+            
+            dist_dict = np.zeros((dict_size,), dtype=np.int8)
+            dict_ind = 0
+
+            for combination in combinations:
                 skip_mex = False
 
                 # read the combination to create the position bitstring
@@ -44,7 +67,45 @@ def calculate_nim(board, groups, group_sizes, check_A, check_B, canon_trans, tra
                 # find all possible next moves
                 follower_moves = next_pos_iterator(pos, groups, group_sizes)
 
-                for next_pos, line, pivot_change in follower_moves:
+                # create a dynamic distribution for when lines are added
+                new_dist = list(distribution)
+
+                prev_group = 0
+                for i in range(len(new_dist)):
+                    if new_dist[i] > 0:
+                        prev_group = i
+
+                new_dist[prev_group] -= 1
+
+                next_group_combs = group_combinations(new_dist, group_sizes, canon_trans)
+
+                # load the dictionary corresponding to the new distribution
+                path = f"nim/{missing-1}/"
+                for i in range(len(new_dist)-2):
+                    path += f"{str(new_dist[i])}/"
+                path += f"{new_dist[-2]}.bin"
+
+                with open(path + '_p', 'rb') as handle:
+                    saved = pickle.load(handle)
+
+                for next_pos, line, group_ind, pivot_change in follower_moves:
+
+                    if group_ind != prev_group:
+                        # update the distribution if a line is added to a new group
+                        new_dist[prev_group] += 1
+                        new_dist[group_ind] -= 1
+                        prev_group = group_ind
+
+                        next_group_combs = group_combinations(new_dist, group_sizes, canon_trans)
+
+                        # load the corresponding dictionary
+                        path = f"nim/{missing-1}/"
+                        for i in range(len(new_dist)-2):
+                            path += f"{str(new_dist[i])}/"
+                        path += f"{new_dist[-2]}.bin"
+
+                        with open(path + '_p', 'rb') as handle:
+                            saved = pickle.load(handle)
                      
                     capture_box = False
 
@@ -71,8 +132,7 @@ def calculate_nim(board, groups, group_sizes, check_A, check_B, canon_trans, tra
                             # this checks if the box check that didn't capture the box still detected 2 lines present
                             # if it did then this move captured a box in a chain and thus entering this position is loony
                             if (res_A > 0 and (res_A & (res_A - 1)) == 0) or (res_B > 0 and (res_B & (res_B - 1)) == 0):
-                                curr_saved[pos] = -1
-                                dist_dict[pos] = -1
+                                dist_dict[dict_ind] = -1
                                 skip_mex = True
                                 break
 
@@ -80,9 +140,11 @@ def calculate_nim(board, groups, group_sizes, check_A, check_B, canon_trans, tra
                         if pivot_change:
                             next_pos = canonise_pos(next_pos, group_sizes[0], canon_trans, h_flip, v_flip, rot90)
 
+                        # find the index of the position in the array
+                        next_ind = find_pos_ind(next_pos, next_group_combs, group_sizes)
+
                         # if a box was captured and it isn't loony then value is the same as the position of the board after the capture
-                        curr_saved[pos] = saved[next_pos]
-                        dist_dict[pos] = saved[next_pos]
+                        dist_dict[dict_ind] = saved[next_ind]
                         skip_mex = True
                         break
                     else:
@@ -90,41 +152,30 @@ def calculate_nim(board, groups, group_sizes, check_A, check_B, canon_trans, tra
                         if pivot_change:
                             next_pos = canonise_pos(next_pos, group_sizes[0], canon_trans, h_flip, v_flip, rot90)
 
-                        follower_values.add(saved[next_pos])
+                        # find the index of the position in the array
+                        next_ind = find_pos_ind(next_pos, next_group_combs, group_sizes)
+                        follower_values.add(saved[next_ind])
                 
                 # if no boxes were captured then the value is the mex of all follower boards
                 if not skip_mex:
-                    curr_saved[pos] = mex(follower_values)
-                    dist_dict[pos] = mex(follower_values)
+                    dist_dict[dict_ind] = mex(follower_values)
+                dict_ind += 1
             
+            # save the distribution dictionary
             path = f"nim/{missing}/"
             for i in range(len(distribution)-2):
                 path += f"{str(distribution[i])}/"
-            path += f"{distribution[-2]}.txt"
-            path = Path(path)
+            path += f"{distribution[-2]}.bin"
+            path_obj = Path(path[:-3] + "txt")
 
-            path.parent.mkdir(parents=True, exist_ok=True)
-
-            # with path.open("w", encoding="utf-8") as r:
-            #     for key, value in dist_dict.items():
-            #         r.write(f"{key}: {value}\n")
+            path_obj.parent.mkdir(parents=True, exist_ok=True)
             
-            with path.open("w", encoding="utf-8") as r:
-                for key, value in dist_dict.items():
-                    r.write(f"{bin(key)[2:]}: {value}\n")
-        
-        # write the dictionary to the disk
-        # with open(f'nim/nim_{missing}.txt', 'w') as r:
-        #     for key, value in curr_saved.items():
-        #         r.write(f"{bin(key)[2:]}: {value}\n")
-
-        # with open(f'nim/nim_{missing}.txt', 'w') as r:
-        #     for key, value in curr_saved.items():
-        #         r.write(f"{key}: {value}\n")
-        
-        # remove the old dictionary from memory
-        saved = curr_saved
-        curr_saved = dict()
+            with path_obj.open("w", encoding="utf-8") as r:
+                for value in dist_dict:
+                    r.write(f"{value}\n")
+            
+            with open(path + '_p', 'wb') as handle:
+                pickle.dump(dist_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 def main():
     size = 2
