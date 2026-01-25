@@ -366,31 +366,6 @@ def group_combinations(distribution, group_bits, canon_trans):
     
     return [pivot_combinations] + middle_groups + [corner_combinations], [pivot_map] + comb_map + [corner_map]
 
-def update_group_combinations(group_ind, distribution, group_bits, group_count, canon_trans):
-    if group_ind == 0:
-        pivot_combinations = [
-            comb for comb in gospers_hack(distribution[0], group_bits[0])
-            if canon_trans[comb] == 0
-        ]
-        return pivot_combinations, {comb: i for i, comb in enumerate(pivot_combinations)}
-
-    if group_ind == group_count-1:
-        corner_combinations = []
-        corner_distributions = distribution_iterator(distribution[-1], [2, 2, 2, 2], 4, 0, 8)
-        for corner_distribution in corner_distributions:
-            combination = 0
-
-            # build the bit combination from smallest value to highest
-            for i in range(3, -1, -1):
-                # if 2 lines were assigned, set 11 to the bits to denote both lines being present
-                corner = 3 if corner_distribution[i] == 2 else corner_distribution[i]
-                combination |= corner << (6 - (i * 2))
-            corner_combinations.append(combination)
-        return corner_combinations, {comb: i for i, comb in enumerate(corner_combinations)}
-
-    group_combs = list(gospers_hack(distribution[group_ind], group_bits[group_ind]))
-    return group_combs, {comb:i for i, comb in enumerate(group_combs)}
-
 def combinations_iterator(group_combinations):
     '''
     Iterates through every combination of bits where the number of 1s per group adheres to the distribution
@@ -401,13 +376,65 @@ def combinations_iterator(group_combinations):
     for combination in cart_product_reverse(*group_combinations):
         yield combination
 
-def find_pos_ind(pos, group_combinations, group_sizes, ind_multipliers, comb_map, shifts):
+def generate_comb_map(size):
+    '''
+    Generates a dictionary mapping each group configuration to its combination index
+    This records the index of a configuration if all combinations with a given distribution were to be computed
+    '''
+    comb_map = dict()
+    count_map = dict()
+    for i in range(0, size+1):
+        j = 0
+        for comb in gospers_hack(i, size):
+            comb_map[comb] = j
+            j += 1
+        count_map[i] = j
+    return comb_map, count_map
+
+def generate_pivot_comb_map(size, canon_trans):
+    '''
+    Generates a dictionary mapping each pivot configuration to its combination index
+    This records the index of a configuration if all combinations with a given distribution were to be computed
+    '''
+    comb_map = dict()
+    count_map = dict()
+    for i in range(0, size+1):
+        j = 0
+        for comb in gospers_hack(i, size):
+            if canon_trans[comb] == 0:
+                comb_map[comb] = j
+                j += 1
+        count_map[i] = j
+    return comb_map, count_map
+
+def generate_corner_comb_map():
+    '''
+    Generates a dictionary mapping each corner configuration to its combination index
+    This records the index of a configuration if all combinations with a given distribution were to be computed
+    '''
+    comb_map = dict()
+    count_map = dict()
+    for i in range(0, 9):
+        corner_distributions = distribution_iterator(i, [2, 2, 2, 2], 4, 0, 8)
+        j = 0
+        for corner_distribution in corner_distributions:
+            combination = 0
+
+            # build the bit combination from smallest value to highest
+            for i in range(3, -1, -1):
+                # if 2 lines were assigned, set 11 to the bits to denote both lines being present
+                corner = 3 if corner_distribution[i] == 2 else corner_distribution[i]
+                combination |= corner << (6 - (i * 2))
+            comb_map[combination] = j
+            j += 1
+        count_map[i] = j
+    return comb_map, count_map
+
+def find_pos_ind(pos, group_sizes, ind_multipliers, comb_map, shifts):
     '''
     Finds the index of a position in a distribution's dictionary array
-    '''  
+    '''
     ind = 0
-    # print(group_combinations)
-    # print(comb_map)
     for size, mult, c_map, shift in zip(group_sizes, ind_multipliers, comb_map, shifts):
         group = (pos >> shift) & ((1 << size) - 1)
         ind += c_map[group] * mult
