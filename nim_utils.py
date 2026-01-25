@@ -11,13 +11,11 @@ def mex(values):
         mex_val += 1
     return mex_val
 
-def transformation_maps(board: Board):
+def transformation_maps(size, num_lines):
     '''
     Constructs transformation maps for horizontal and vertical flips, and 90 degree clockwise rotation
     The map is for a bitstring ordered by index
     '''
-    num_lines = board.N_LINES
-    size = board.SIZE
     half = num_lines // 2
 
     h_flip = [0] * num_lines
@@ -161,7 +159,7 @@ def apply_map(pos, trans_map):
             new_pos |= (1 << trans_map[bit])
     return new_pos
 
-def canonical_transformations(groups, maps):
+def canonical_transformations(groups, h_flip, v_flip, rot90):
     '''
     Iterates through each possible combination of group bits in the pivot and applies every transformation to them
     The variant with the lowest numerical value is the canonical one
@@ -175,8 +173,6 @@ def canonical_transformations(groups, maps):
         - 6 = rot90, rot90
         - 7 = rot90, rot90, rot90
     '''
-    h_flip, v_flip, rot90 = maps
-
     canon_trans = {0:0}
     
     group_len = len(groups[0])
@@ -236,7 +232,7 @@ def canonise_pos(pos, pivot_size, canon_trans, h_flip, v_flip, rot90):
                 return apply_map(pos, rot90)
             return pos
 
-def generate_box_checks(board: Board, groups):
+def generate_box_checks(board: Board, groups, shifts):
     '''
     Constructs 2 masks for each line to check the other surrounding lines for each box it is attached to
     Lines on edges are only attached to 1 box so 1 mask will be None
@@ -247,13 +243,6 @@ def generate_box_checks(board: Board, groups):
 
     check_A = [None] * n_lines
     check_B = [None] * n_lines
-
-    # find bit shifts for each group
-    shifts = []
-    start = 0
-    for i in range(len(groups)):
-        shifts.append(start)
-        start += len(groups[i])
 
     # iterate through each box
     for row in range(size):
@@ -286,29 +275,28 @@ def generate_box_checks(board: Board, groups):
                     
     return check_A, check_B
 
-def distribution_iterator(remaining, capacities, distribution=[]):
+def distribution_iterator(remaining, capacities, group_count, ind, total_capacity, distribution=[]):
     '''
     Recursively iterates through each distribution of missing lines between each group
     '''
     
     # if there are no more groups to fill and there are no more remaining lines, return
-    if not capacities:
+    if ind == group_count:
         if remaining == 0:
             yield tuple(distribution)
         return
 
-    current_capacity = capacities[0]
-    remaining_capacities = capacities[1:]
-
-    remaining_capacity = sum(remaining_capacities)
+    current_capacity = capacities[ind]
+    total_remaining_capacity = total_capacity - current_capacity
     
     # iterate through each possible assigned number of lines
-    for i in range(min(current_capacity, remaining) + 1):
-        
-        # if there are too many lines to distribute to the rest, this isn't valid
-        if remaining_capacity >= remaining - i:
+    for i in range(current_capacity + 1):
+        next_remaining = remaining - i
+        if next_remaining < 0:
+            return
+        if total_remaining_capacity >= next_remaining:
             # perform the same logic to the rest of the groups with the lines already assigned to this one
-            yield from distribution_iterator(remaining - i, remaining_capacities, distribution + [i])
+            yield from distribution_iterator(next_remaining, capacities, group_count, ind + 1, total_remaining_capacity, distribution + [i])
 
 # From https://rosettacode.org/wiki/Gosper's_hack#Python
 def gospers_hack(ones, bits):
@@ -349,39 +337,59 @@ def group_combinations(distribution, group_bits, canon_trans):
     Finds all possible combinations of bits for each group where the number of 1s adheres to the distribution
     '''
 
-    # only canonical positions are considered
-    pivot_combinations = []
-    for combination in gospers_hack(distribution[0], group_bits[0]):
-        if canon_trans[combination] == 0:
-            pivot_combinations.append(combination)
-    
+    # only canonical positions are considered    
+    pivot_combinations = [
+            comb for comb in gospers_hack(distribution[0], group_bits[0])
+            if canon_trans[comb] == 0
+        ]
+    pivot_map = {comb: i for i, comb in enumerate(pivot_combinations)}
+ 
     # the corners are ternary states so bit iteration isn't valid
     corner_combinations = []
 
     # distribute the missing lines across the corners
-    corner_distributions = distribution_iterator(distribution[-1], [2, 2, 2, 2])
+    corner_distributions = distribution_iterator(distribution[-1], [2, 2, 2, 2], 4, 0, 8)
     for corner_distribution in corner_distributions:
         combination = 0
 
         # build the bit combination from smallest value to highest
-        for i in range(4):
-            corner = corner_distribution[3-i]
-
+        for i in range(3, -1, -1):
             # if 2 lines were assigned, set 11 to the bits to denote both lines being present
-            if corner == 2:
-                corner = 3
-            combination |= corner << ((3-i) * 2)
+            corner = 3 if corner_distribution[i] == 2 else corner_distribution[i]
+            combination |= corner << (6 - (i * 2))
         corner_combinations.append(combination)
-
-    corner_combinations.sort()
+    corner_map = {comb: i for i, comb in enumerate(corner_combinations)}
 
     # each list holds all the possible values for a group that adhere to the distribution of 1s
-    group_combinations = [pivot_combinations]
-    for ones, bits in zip(distribution[1:-1], group_bits[1:-1]):
-        group_combinations.append(list(gospers_hack(ones, bits)))
+    middle_groups = [list(gospers_hack(ones, bits)) for ones, bits in zip(distribution[1:-1], group_bits[1:-1])]
+    comb_map = [{comb:i for i, comb in enumerate(group_combs)} for group_combs in middle_groups]
     
-    group_combinations.append(corner_combinations)
-    return group_combinations
+    return [pivot_combinations] + middle_groups + [corner_combinations], [pivot_map] + comb_map + [corner_map]
+
+def update_group_combinations(group_ind, distribution, group_bits, group_count, canon_trans):
+    if group_ind == 0:
+        pivot_combinations = [
+            comb for comb in gospers_hack(distribution[0], group_bits[0])
+            if canon_trans[comb] == 0
+        ]
+        return pivot_combinations, {comb: i for i, comb in enumerate(pivot_combinations)}
+
+    if group_ind == group_count-1:
+        corner_combinations = []
+        corner_distributions = distribution_iterator(distribution[-1], [2, 2, 2, 2], 4, 0, 8)
+        for corner_distribution in corner_distributions:
+            combination = 0
+
+            # build the bit combination from smallest value to highest
+            for i in range(3, -1, -1):
+                # if 2 lines were assigned, set 11 to the bits to denote both lines being present
+                corner = 3 if corner_distribution[i] == 2 else corner_distribution[i]
+                combination |= corner << (6 - (i * 2))
+            corner_combinations.append(combination)
+        return corner_combinations, {comb: i for i, comb in enumerate(corner_combinations)}
+
+    group_combs = list(gospers_hack(distribution[group_ind], group_bits[group_ind]))
+    return group_combs, {comb:i for i, comb in enumerate(group_combs)}
 
 def combinations_iterator(group_combinations):
     '''
@@ -393,67 +401,46 @@ def combinations_iterator(group_combinations):
     for combination in cart_product_reverse(*group_combinations):
         yield combination
 
-def find_pos_ind(pos, group_combinations, group_sizes):
+def find_pos_ind(pos, group_combinations, group_sizes, ind_multipliers, comb_map, shifts):
     '''
     Finds the index of a position in a distribution's dictionary array
-    '''
-    multipliers = []
-    mult = 1
-    for i in range(len(group_sizes)):
-        multipliers.append(mult)
-        mult *= len(group_combinations[i])
-
+    '''  
     ind = 0
-    shift = 0
-    for i in range(len(group_sizes)):
-        group = (pos >> shift) & ((1 << group_sizes[i]) - 1)
-        shift += group_sizes[i]
-
-        ind += group_combinations[i].index(group) * multipliers[i]
+    # print(group_combinations)
+    # print(comb_map)
+    for size, mult, c_map, shift in zip(group_sizes, ind_multipliers, comb_map, shifts):
+        group = (pos >> shift) & ((1 << size) - 1)
+        ind += c_map[group] * mult
     
     return ind
 
-def next_pos_iterator(pos, groups, group_sizes):
+def next_pos_iterator(pos, groups, group_sizes, shifts, b2g, b2l):
     '''
     Iterates through every position yielded from removing a single 1
     '''
 
     # ignore the corner group when iterating through the bits
-    pos_length = sum(group_sizes)
-    corner_shift = pos_length - group_sizes[-1]
-    no_corner_mask = (1 << corner_shift) - 1
+    no_corner_mask = (1 << shifts[-1]) - 1
 
     temp = pos & no_corner_mask
 
     # while there are still 1s that can be removed
     while temp > 0:
-        pivot_change = False
-
         # find the location of the rightmost unprocessed 1
         missing = temp & -temp
 
         # find what line index that 1 corresponds to
         ind = missing.bit_length() - 1
-        group_ind = 0
-        for i in range(len(group_sizes)):
-            if ind >= group_sizes[i]:
-                ind -= group_sizes[i]
-            else:
-                group_ind = i
-                line = groups[i][ind]
-
-                # if the line added is in the pivot group, label the pivot as being changed
-                if i == 0:
-                    pivot_change = True
-                break
+        group_ind = b2g[ind]
+        pivot_change = (group_ind == 0)
 
         # remove that 1 from the position, marking it as no longer missing
-        yield pos ^ missing, line, group_ind, pivot_change
+        yield pos ^ missing, b2l[ind], group_ind, pivot_change
         temp &= (temp - 1)
     
     # iterate through each corner, decrementing each ternary state by 1
     for i in range(0, 8, 2):
-        shift = corner_shift + i
+        shift = shifts[-1] + i
 
         # extract the corner state
         state = (pos >> shift) & 3
