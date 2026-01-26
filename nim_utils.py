@@ -342,7 +342,6 @@ def group_combinations(distribution, group_bits, canon_trans):
             comb for comb in gospers_hack(distribution[0], group_bits[0])
             if canon_trans[comb] == 0
         ]
-    pivot_map = {comb: i for i, comb in enumerate(pivot_combinations)}
  
     # the corners are ternary states so bit iteration isn't valid
     corner_combinations = []
@@ -358,13 +357,11 @@ def group_combinations(distribution, group_bits, canon_trans):
             corner = 3 if corner_distribution[i] == 2 else corner_distribution[i]
             combination |= corner << (6 - (i * 2))
         corner_combinations.append(combination)
-    corner_map = {comb: i for i, comb in enumerate(corner_combinations)}
 
     # each list holds all the possible values for a group that adhere to the distribution of 1s
     middle_groups = [list(gospers_hack(ones, bits)) for ones, bits in zip(distribution[1:-1], group_bits[1:-1])]
-    comb_map = [{comb:i for i, comb in enumerate(group_combs)} for group_combs in middle_groups]
     
-    return [pivot_combinations] + middle_groups + [corner_combinations], [pivot_map] + comb_map + [corner_map]
+    return [pivot_combinations] + middle_groups + [corner_combinations]
 
 def combinations_iterator(group_combinations):
     '''
